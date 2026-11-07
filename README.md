@@ -115,12 +115,15 @@ fp32 + AdamW needs ~16 bytes per trainable parameter (weights, gradients, two op
 On top of the static memory, activations grow with batch size and sequence length. Image tokens dominate the sequence, and batches are padded to the longest example, so the largest images in a batch decide the peak. The logits are a large share: the vocabulary is 151,936 tokens, so fp32 logits cost ~0.58 MiB per token at every position, while the loss only uses the few answer positions.
 
 
-## Profiling using the script
+### Profiling using the script
 You can ```--activation_measure``` and ```--mem-snapshot``` for memory profiling.
 
-### mem-snapshot
 Using ```torch.cuda.memory._dump_snapshot``` over 3 steps to profile. You can use ```https://docs.pytorch.org/memory_viz``` to visualize your traces.
 
+To better understand the tracing, look [here](https://github.com/huggingface/blog/blob/main/train_memory.md).
+<p align="center">
+    <img src="https://camo.githubusercontent.com/c614cf54fe5fc1ad723d8cef6affbdafef1c28eb930d102483296726124e96a5/68747470733a2f2f68756767696e67666163652e636f2f64617461736574732f68756767696e67666163652f646f63756d656e746174696f6e2d696d616765732f7265736f6c76652f6d61696e2f626c6f672f747261696e5f6d656d6f72792f636f6c6f72697a65645f747261696e696e675f70726f66696c652e706e67" width="70%"/>
+<p>
 
 
 ## The learning paradigm
