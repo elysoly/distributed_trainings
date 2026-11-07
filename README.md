@@ -18,8 +18,9 @@ The `sft_vl_lab` script does supervised fine-tuning (SFT) of the model (full par
   
 Train and test splits are separate, so the before/after numbers are clean.
 
-### grpo_vl_lab
-TO DO
+### Reinforcement Learning (GRPO)
+TO DO: grpo_vl_lab
+
 
 ## Memory requirement
 Precision fp32 + AdamW: ~16 bytes per trainable parameter, ~4 per frozen one:
@@ -148,7 +149,7 @@ TODO: RL methods like GRPO address this directly: the model generates its own se
 
 
 
-### Model
+## Model
 Model: Qwen3-VL-2B-Instruct
 Parameters: 2 Billion
 Capabilities: Image understanding, OCR, visual reasoning, general conversation
