@@ -9,7 +9,6 @@ import time
 import torch
 import torch.distributed as dist
 import transformers
-from act_meter import SavedActivationMeter
 from datasets import load_dataset
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
@@ -22,6 +21,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoProcessor
+
+from act_meter import SavedActivationMeter
 
 try:  # transformers 4.x
     from transformers import AutoModelForImageTextToText as AutoVLM

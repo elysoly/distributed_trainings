@@ -1,0 +1,51 @@
+# Pre-commit hooks
+default_language_version:
+  python: python3.13
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml # accelerate / FSDP configs
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: debug-statements # forgotten breakpoint() / pdb before a 4-GPU run
+      # Keep model weights, memory snapshots and checkpoints out of git.
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+
+  # Strip outputs from notebooks (images and logs make them huge and hard to diff).
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout
+
+  # Remove unused imports in python files.
+  - repo: https://github.com/pycqa/autoflake
+    rev: v2.4.0
+    hooks:
+      - id: autoflake
+        args: ["--in-place", "--remove-all-unused-imports"]
+
+  # Sort imports in python files (black-compatible style, as the scripts use).
+  - repo: https://github.com/pycqa/isort
+    rev: 9.0.2
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+
+  # Run the python linter, errors only.
+  # It runs in its own environment without torch / transformers (installing torch there
+  # would take GBs), so it can't resolve those imports: import-error is disabled.
+  - repo: https://github.com/pycqa/pylint
+    rev: v4.1.3
+    hooks:
+      - id: pylint
+        args:
+          - "--errors-only"
+          - "--disable=import-error"
+          - "--py-version=3.13"
+          # Scripts import each other from their own folder (e.g. act_meter.py).
+          - "--init-hook"
+          - "import sys; sys.path.insert(0, './')"
