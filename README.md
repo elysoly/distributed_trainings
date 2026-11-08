@@ -78,7 +78,18 @@ Recommended for every run, to reduce allocator fragmentation.
   
         ``` torchrun --nproc_per_node 4 sft_vl_lab.py --mode fsdp --model /mnt/ssd/models/Qwen3-VL-4B-Instruct --data $D --ac --batch-size 1 ```
 
-Global batch = --batch-size × number of GPUs × --grad-accum. Changing the batch size changes the number of steps, so keep the learning rate in mind when comparing accuracy across batch sizes.
+### Analysis
+- Global batch = --batch-size × number of GPUs × --grad-accum. Changing the batch size changes the number of steps, so keep the learning rate in mind when comparing accuracy across batch sizes.
+- Running different experiments to compare the impact of techniques; gradient(activation) checkpointing is very efficient, comparing run 3 vs 4, it costs almost nothing in time 604 → 605 tokens/s, and memory peak is reduced.
+    - 
+
+| **experiment**  | **act_ckpt** | **train_vision** | **trainable_B** | **peak_gpu_mem_GB** | **train_tokens_per_s** | **train_minutes** | 
+| --------------- | ------------ | ---------------- | --------------- | ------------------- | ---------------------- | ------------- |
+| **run3 (2B)**   | **FALSE**    | **FALSE**        | **1.82**        | **13.93**           | **604**                | **17.5**      |
+| **run4 (2B)**   | **TRUE**     | **FALSE**        | **1.82**        | **12.37**           | **605**                | **17.4**      |
+| **run5 (2B)**   | **FALSE**    | **TRUE**         | **2.13**        | **19.32**           | **502**                | **21.0**      |
+| **run5_1(2B)**  | **TRUE**     | **TRUE**         | **2.13**        | **13.05**           | **500**                | **21.1**      |
+| **run6 (4B)**   | **TRUE**     | **FALSE**        | **3.74**        | **18.10**            | **144**               | **73.2**      |
 
 
 ## Distributed training reminder
@@ -154,12 +165,13 @@ TODO: RL methods like GRPO address this directly: the model generates its own se
 
 ## Model
 Model: Qwen3-VL-2B-Instruct
-Parameters: 2 Billion
+
 Capabilities: Image understanding, OCR, visual reasoning, general conversation
+
 Qwen3-VL adopts a three-module architecture:
-- vision encoder
+- Vision encoder
 - MLP-based vision–language merger
-- large language model (LLM)
+- Large Language Model (LLM)
 <p align="center">
     <img src="./assets/qwen3vl_arc.jpg" width="70%"/>
 <p>
