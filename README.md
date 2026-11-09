@@ -16,11 +16,13 @@ The `sft_vl_lab` script does supervised fine-tuning (SFT) of the model (full par
   5. Fine-tunes on train questions; the loss covers only the answer tokens (prompt, image tokens and padding are masked to -100).
   6. Evaluates again, appends a row to results_vl.csv, optionally saves the model.
 
-Train and test splits are separate, so the before/after numbers are clean.
+Train and test splits are separate, so the before/after numbers are clean. In summary:
+- copy the one reference answer
+- loss: cross-entropy on the reference
 
 ### 2. Reinforcement Learning (GRPO)
 The `grpo_vl_lab` script does fine-tuning of a Qwen-VL model on ChartQA with FSDP2 (or DDP), with an accuracy check on held-out ChartQA test questions before and after.
-Same model, data, sharding and evaluation as `fsdp_vl_lab.py`; only the training step changes.
+Same model, data, sharding and evaluation as FSDP; only the training step changes.
 
 One training step, per GPU:
   1. Rollout: take `--prompts-per-gpu` questions, repeat each `G` times, sample with `generate()`.
@@ -36,13 +38,7 @@ One training step, per GPU:
      The loss is averaged over all answer tokens of the rollout (token-level, as in DAPO).
 
 Every rank does the same number of `generate()` calls and forward/backward passes: under FSDP each one is a collective, so a rank that skipped a micro-batch (e.g. one whose
-advantages are all 0) would hang the others.
-
-SFT (`fsdp_vl_lab`):
-- copy the one reference answer
-- loss: cross-entropy on the reference
-
-GRPO (`grpo_vl_lab`):
+advantages are all 0) would hang the others. In summary:
 - sample `G` answers per question from the model
 - reward each answer with relaxed accuracy (0 or 1)
 - advantage = reward relative to its group of `G`
@@ -148,6 +144,21 @@ Recommended for every run, to reduce allocator fragmentation.
 **GRPO experiments**
 - Each step generates `prompts-per-gpu x G` sequences. Under FSDP every new token is a forward that all-gathers the whole model, so rollout usually dominates: the log shows both.
 
+| **experiment**  | **KL_Beta**  | **act_ckpt**     | **peak_gpu_mem_GB** | **answer_tokens**   | **train_minutes**      | **acc_before**  |  **acc_after**  |
+| --------------- | ------------ | ---------------- | ------------------- | ------------------- | ---------------------- | --------------- | --------------- |
+| **run1 (2B)**   | **0**        | **FALSE**        | **20.1**            | **1584**            | **2.30**               | **0.725**       |  0.750          |
+| **run2 (2B)**   | **0**        | **FALSE**        | **20.6**            | **74932**           | **114.80**             | **0.755**       |  0.775          |
+| **run3 (2B)**   | **0**        | **TRUE**         | **12.87**           | **75667**           | **119.30**             | **0.740**       |  0.770          |
+| **run4(2B)**    | **0.04**     | **TRUE**         | **16.40**           | **76089**           | **143.40**             | **0.740**       |  0.765          |
+
+
+
+
+**Profiling**
+Using `--profiling` option:
+<p align="center">
+    <img src="./assets/tracing.png" width="70%"/>
+<p>
 
 ## Distributed training reminder
 - The memory usage (during training) is due to storing:

@@ -97,6 +97,13 @@ def parse_args():
         action="store_true",
         help="compute activation memory usage",
     )
+
+    p.add_argument(
+        "--profiling",
+        action="store_true",
+        help="activate PyTorch profiler and dump traces to ./log/profile",
+    )
+
     return p.parse_args()
 
 
@@ -424,6 +431,30 @@ def main():
             )
 
     # 7. Train.
+
+    profiler = None
+    if args.profiling:
+        if rank == 0:
+            print(
+                "Profiling enabled: PyTorch profiler will dump traces to ./log/profile",
+                flush=True,
+            )
+            os.makedirs("./log/profile", exist_ok=True)
+        barrier()
+        profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                "./log/profile",
+                worker_name=f"rank{rank}",
+            ),
+            with_stack=False,
+        )
+        profiler.start()
+
     if rank == 0:
         print(
             f"Training {total_steps} steps; global batch = {args.batch_size} x {world} GPUs "
@@ -438,80 +469,90 @@ def main():
     sync()
     t_start = t_log = time.perf_counter()
     done = False
-    for epoch in range(args.epochs):
-        sampler.set_epoch(epoch)
-        for i, batch in enumerate(train_loader):
-            if i >= steps_per_epoch * args.grad_accum:
-                break
-            tokens += int(
-                batch["attention_mask"].sum()
-            )  # text + image tokens, no padding
-            batch = batch.to(device)
+    try:
+        for epoch in range(args.epochs):
+            sampler.set_epoch(epoch)
+            for i, batch in enumerate(train_loader):
+                if i >= steps_per_epoch * args.grad_accum:
+                    break
+                tokens += int(
+                    batch["attention_mask"].sum()
+                )  # text + image tokens, no padding
+                batch = batch.to(device)
 
-            if args.activation_measure:
-                measure = (
-                    epoch == 0 and i == 0
-                )  # first micro-step only: same condition on every rank
-                mem0 = torch.cuda.memory_allocated(device)
-                with (
-                    SavedActivationMeter(model)
-                    if measure
-                    else contextlib.nullcontext() as meter
-                ):
+                if args.activation_measure:
+                    measure = (
+                        epoch == 0 and i == 0
+                    )  # first micro-step only: same condition on every rank
+                    mem0 = torch.cuda.memory_allocated(device)
+                    with (
+                        SavedActivationMeter(model)
+                        if measure
+                        else contextlib.nullcontext() as meter
+                    ):
+                        loss = model(**batch, use_cache=False).loss / args.grad_accum
+                    if measure:
+                        meter.report(
+                            device,
+                            rank,
+                            fwd_delta_bytes=torch.cuda.memory_allocated(device) - mem0,
+                        )
+                else:
                     loss = model(**batch, use_cache=False).loss / args.grad_accum
-                if measure:
-                    meter.report(
-                        device,
-                        rank,
-                        fwd_delta_bytes=torch.cuda.memory_allocated(device) - mem0,
-                    )
-            else:
-                loss = model(**batch, use_cache=False).loss / args.grad_accum
 
-            loss.backward()  # FSDP: re-gather each block, then reduce-scatter its gradients
-            step_loss += loss.detach()
-            if (i + 1) % args.grad_accum:
-                continue  # keep accumulating (gradients are still reduced every micro-step)
+                loss.backward()  # FSDP: re-gather each block, then reduce-scatter its gradients
+                step_loss += loss.detach()
+                if (i + 1) % args.grad_accum:
+                    continue  # keep accumulating (gradients are still reduced every micro-step)
 
-            gnorm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
-            if hasattr(
-                gnorm, "full_tensor"
-            ):  # FSDP returns a DTensor; call on every rank
-                gnorm = gnorm.full_tensor()
-            optim.step()
-            sched.step()
-            optim.zero_grad(set_to_none=True)
-            step += 1
+                gnorm = torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
+                if hasattr(
+                    gnorm, "full_tensor"
+                ):  # FSDP returns a DTensor; call on every rank
+                    gnorm = gnorm.full_tensor()
+                optim.step()
+                sched.step()
+                optim.zero_grad(set_to_none=True)
+                step += 1
 
-            if step % args.log_every == 0 or step == total_steps:
-                dist.all_reduce(step_loss)
-                sync()
-                now = time.perf_counter()
-                if rank == 0:
-                    n = (
-                        args.log_every
-                        if step % args.log_every == 0
-                        else step % args.log_every
-                    )
+                if step % args.log_every == 0 or step == total_steps:
+                    dist.all_reduce(step_loss)
+                    sync()
+                    now = time.perf_counter()
+                    if rank == 0:
+                        n = (
+                            args.log_every
+                            if step % args.log_every == 0
+                            else step % args.log_every
+                        )
+                        print(
+                            f"step {step:4d}/{total_steps}  loss {step_loss.item() / world:.4f}  "
+                            f"grad_norm {gnorm.item():.2f}  lr {sched.get_last_lr()[0]:.2e}  "
+                            f"{(now - t_log) / n:.2f} s/step",
+                            flush=True,
+                        )
+                    t_log = now
+                if args.mem_snapshot and use_cuda and rank == 0 and step == 3:
                     print(
-                        f"step {step:4d}/{total_steps}  loss {step_loss.item() / world:.4f}  "
-                        f"grad_norm {gnorm.item():.2f}  lr {sched.get_last_lr()[0]:.2e}  "
-                        f"{(now - t_log) / n:.2f} s/step",
-                        flush=True,
+                        "Dumping memory snapshot to mem_train_rank0.pickle", flush=True
                     )
-                t_log = now
-            if args.mem_snapshot and use_cuda and rank == 0 and step == 3:
-                print("Dumping memory snapshot to mem_train_rank0.pickle", flush=True)
-                torch.cuda.memory._dump_snapshot("mem_train_rank0.pickle")
-                torch.cuda.memory._record_memory_history(enabled=None)  # stop recording
+                    torch.cuda.memory._dump_snapshot("mem_train_rank0.pickle")
+                    torch.cuda.memory._record_memory_history(
+                        enabled=None
+                    )  # stop recording
 
-            step_loss.zero_()
-            if step >= total_steps:
-                done = True
+                step_loss.zero_()
+                if step >= total_steps:
+                    done = True
+                    break
+                if args.profiling and profiler is not None:
+                    profiler.step()
+
+            if done:
                 break
-
-        if done:
-            break
+    finally:
+        if args.profiling and profiler is not None:
+            profiler.stop()
     sync()
 
     train_s = time.perf_counter() - t_start
@@ -565,7 +606,7 @@ def main():
     }
     if rank == 0:
         print(row, flush=True)
-        new_file = not os.path.exists("results_vl.csv")
+        new_file = not os.path.exists("results_sft.csv")
         with open(f"{args.exp_name}_results_vl.csv", "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(row))
             if new_file:
