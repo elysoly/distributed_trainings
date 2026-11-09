@@ -4,8 +4,8 @@
 - I used a machine with 4xtitan RTX (24GB vRAM)
 
 ## About the scripts
-###  Supervised Fine-Tuning (SFT):
-The `sft_vl_lab` script does supervised fine-tuning (SFT) of the model (full parameter) on ChartQA, trained with next-token prediction on the answer tokens only. Each chart + question has one reference answer
+###  1. Supervised Fine-Tuning (SFT)
+The `sft_vl_lab` script does supervised fine-tuning (SFT) of the model (full parameter) on ChartQA, trained with next-token prediction on the answer tokens only. Each chart + question has one reference answer.
 
   1. Loads a Qwen-VL Instruct model (Qwen3-VL or Qwen2.5-VL) in fp32.
   2. Freezes the vision encoder; the vision-to-language merger stays trainable. ```--train-vision``` trains everything.
@@ -15,11 +15,39 @@ The `sft_vl_lab` script does supervised fine-tuning (SFT) of the model (full par
   4. Evaluates relaxed accuracy (the standard ChartQA metric) on test questions.
   5. Fine-tunes on train questions; the loss covers only the answer tokens (prompt, image tokens and padding are masked to -100).
   6. Evaluates again, appends a row to results_vl.csv, optionally saves the model.
-  
+
 Train and test splits are separate, so the before/after numbers are clean.
 
-### Reinforcement Learning (GRPO)
-TO DO: grpo_vl_lab
+### 2. Reinforcement Learning (GRPO)
+The `grpo_vl_lab` script does fine-tuning of a Qwen-VL model on ChartQA with FSDP2 (or DDP), with an accuracy check on held-out ChartQA test questions before and after.
+Same model, data, sharding and evaluation as `fsdp_vl_lab.py`; only the training step changes.
+
+One training step, per GPU:
+  1. Rollout: take `--prompts-per-gpu` questions, repeat each `G` times, sample with `generate()`.
+  2. Reward: `relaxed_correct(answer, target)` -> 1.0 or 0.0.
+  3. Advantage: `A = (r - mean of its group) / (std of its group)`; `--no-std-norm` drops the division (Dr. GRPO).
+     A group where all `G` answers agree (all right or all wrong) has `A = 0`
+     and teaches nothing: watch the "no-signal" column in the logs.
+  4. Policy update: one forward over prompt + answer, log-probs of the answer tokens only
+     (logits_to_keep),
+     `loss = -min(ratio * A, clip(ratio) * A) [+ beta * KL to the reference]`.
+     `--ppo-epochs > 1` reuses the same rollout for several optimizer steps; then the ratio
+     and the clipping matter. With 1 (default), ratio = 1 and it is plain policy gradient.
+     The loss is averaged over all answer tokens of the rollout (token-level, as in DAPO).
+
+Every rank does the same number of `generate()` calls and forward/backward passes: under FSDP each one is a collective, so a rank that skipped a micro-batch (e.g. one whose
+advantages are all 0) would hang the others.
+
+SFT (`fsdp_vl_lab`):
+- copy the one reference answer
+- loss: cross-entropy on the reference
+
+GRPO (`grpo_vl_lab`):
+- sample `G` answers per question from the model
+- reward each answer with relaxed accuracy (0 or 1)
+- advantage = reward relative to its group of `G`
+- loss: raise the log-prob of answers that beat their group, lower the others (clipped, PPO-style)
+
 
 
 ## Memory requirement
@@ -29,6 +57,9 @@ Precision fp32 + AdamW: ~16 bytes per trainable parameter, ~4 per frozen one:
   Qwen3-VL-8B  ~130 GB : doesn't fit on 4 x 24 GB without CPU offload; use LoRA instead
 Every rank first loads the full fp32 model in CPU RAM (4 x 8.5 GB for 2B): check `free -g`.
 I used Instruct models, Thinking models write long reasoning before the answer.
+
+In case of GRPO: + a sharded reference model if `--kl-beta > 0` (~2 GB/GPU, and every rank first loads a second full copy in CPU RAM).
+
 
 ## Requirements
 
@@ -54,42 +85,68 @@ Use Instruct models: Thinking models write long reasoning before the answer, whi
 Recommended for every run, to reduce allocator fragmentation.
 
 ## Experiments
+
+### SFT
   1. Smoke test: 10 steps, small eval
-  
+
         ```torchrun --nproc_per_node 4 sft_vl_lab.py --mode fsdp --model $M --data $D --max-steps 10 --eval-samples 40```
 
   2. DDP on the same model: expect out-of-memory at the first training step
-  
+
         ``` torchrun --nproc_per_node 4 sft_vl_lab.py --mode ddp --model $M --data $D --skip-baseline --max-steps 5 ```
 
   3. The real run: baseline eval, 1 epoch on 2,000 examples, eval again, save
-  
+
         ``` torchrun --nproc_per_node 4 sft_vl_lab.py --mode fsdp --model $M --data $D --save-dir /mnt/ssd/models/qwen3vl2b-chartqa ```
 
   4. Activation checkpointing: compare peak memory and speed with run 3
-  
+
         ``` torchrun --nproc_per_node 4 sft_vl_lab.py --mode fsdp --model $M --data $D --ac --skip-baseline ```
 
   5. Also train the vision encoder
-  
+
         ``` torchrun --nproc_per_node 4 sft_vl_lab.py --mode fsdp --model $M --data $D --train-vision --skip-baseline ```
 
   6. Bigger model
-  
+
         ``` torchrun --nproc_per_node 4 sft_vl_lab.py --mode fsdp --model /mnt/ssd/models/Qwen3-VL-4B-Instruct --data $D --ac --batch-size 1 ```
 
-### Analysis
-- Global batch = --batch-size × number of GPUs × --grad-accum. Changing the batch size changes the number of steps, so keep the learning rate in mind when comparing accuracy across batch sizes.
-- Running different experiments to compare the impact of techniques; gradient(activation) checkpointing is very efficient, comparing run 3 vs 4, it costs almost nothing in time 604 → 605 tokens/s, and memory peak is reduced.
-    - 
+### GRPO
+  1. Smoke test: 5 steps, small eval
 
-| **experiment**  | **act_ckpt** | **train_vision** | **trainable_B** | **peak_gpu_mem_GB** | **train_tokens_per_s** | **train_minutes** | 
+        `torchrun --nproc_per_node 4 grpo_vl_lab.py --model $M --data $D --max-steps 5 --eval-samples 40`
+
+  2. GRPO from the base Instruct model
+
+        `torchrun --nproc_per_node 4 grpo_vl_lab.py --model $M --data $D`
+
+  3. GRPO on top of the SFT checkpoint (the usual SFT -> RL pipeline)
+
+  `torchrun --nproc_per_node 4 grpo_vl_lab.py --model /mnt/ssd/models/qwen3vl2b-chartqa --data $D`
+
+  4. With a KL penalty to the starting model, and with Dr. GRPO normalization
+
+    `torchrun --nproc_per_node 4 grpo_vl_lab.py --model $M --data $D --kl-beta 0.04 --skip-baseline`
+
+    `torchrun --nproc_per_node 4 grpo_vl_lab.py --model $M --data $D --no-std-norm --skip-baseline`
+
+### Analysis
+
+**SFT experiments**
+- `Global batch = --batch-size × number of GPUs × --grad-accum`. Changing the batch size changes the number of steps, so keep the learning rate in mind when comparing accuracy across batch sizes.
+- Running different experiments to compare the impact of techniques; gradient(activation) checkpointing is very efficient, comparing run 3 vs 4, it costs almost nothing in time 604 → 605 tokens/s, and memory peak is reduced.
+
+| **experiment**  | **act_ckpt** | **train_vision** | **trainable_B** | **peak_gpu_mem_GB** | **train_tokens_per_s** | **train_minutes** |
 | --------------- | ------------ | ---------------- | --------------- | ------------------- | ---------------------- | ------------- |
 | **run3 (2B)**   | **FALSE**    | **FALSE**        | **1.82**        | **13.93**           | **604**                | **17.5**      |
 | **run4 (2B)**   | **TRUE**     | **FALSE**        | **1.82**        | **12.37**           | **605**                | **17.4**      |
 | **run5 (2B)**   | **FALSE**    | **TRUE**         | **2.13**        | **19.32**           | **502**                | **21.0**      |
 | **run5_1(2B)**  | **TRUE**     | **TRUE**         | **2.13**        | **13.05**           | **500**                | **21.1**      |
 | **run6 (4B)**   | **TRUE**     | **FALSE**        | **3.74**        | **18.10**            | **144**               | **73.2**      |
+
+
+**GRPO experiments**
+- Each step generates `prompts-per-gpu x G` sequences. Under FSDP every new token is a forward that all-gathers the whole model, so rollout usually dominates: the log shows both.
 
 
 ## Distributed training reminder
