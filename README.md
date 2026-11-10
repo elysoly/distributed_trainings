@@ -230,7 +230,14 @@ TODO: RL methods like GRPO address this directly: the model generates its own se
 
 ## Troubleshooting
 
-**`CUDACachingAllocator ... memory allocation failed with OOM` warnings while training continues.** These are warnings, not errors: an allocation failed, the allocator freed its cache and retried successfully. Typical requests are the root unit's gathered weights (~1.6 GB), the embedding/`lm_head` gradient (~1.2 GB) and the logits (variable size). They signal fragmentation near the memory limit and slow every rank down. Fixes: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, a smaller batch, or `--ac`. Track `torch.cuda.memory_stats(device)["num_alloc_retries"]`; it should stay at 0.
+- **`CUDACachingAllocator ... memory allocation failed with OOM` warnings while training continues.** These are warnings, not errors: an allocation failed, the allocator freed its cache and retried successfully. Typical requests are the root unit's gathered weights (~1.6 GB), the embedding/`lm_head` gradient (~1.2 GB) and the logits (variable size). They signal fragmentation near the memory limit and slow every rank down. Fixes: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, a smaller batch, or `--ac`. Track `torch.cuda.memory_stats(device)["num_alloc_retries"]`; it should stay at 0.
+
+
+- FSDP manages parameter sharding and communication, while the checkpoint wrapper manages activation recomputation.
+The order matters because it determines how these mechanisms interact.
+<p align="center">
+    <img src="./assets/wrapping_order.png" width="70%"/>
+<p>
 
 
 
