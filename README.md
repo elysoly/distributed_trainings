@@ -3,6 +3,9 @@
 - Running  full fine-tuning of a Qwen-VL model on ChartQA with FSDP2 (or DDP), with an accuracy check on held-out ChartQA test questions before and after training.
 - I used a machine with 4xtitan RTX (24GB vRAM)
 
+## TO DO
+- [ ] use vLLM as the generation engine for GRPO to accelerate rollout generation 
+
 ## About the scripts
 ###  1. Supervised Fine-Tuning (SFT)
 The `sft_vl_lab` script does supervised fine-tuning (SFT) of the model (full parameter) on ChartQA, trained with next-token prediction on the answer tokens only. Each chart + question has one reference answer.
